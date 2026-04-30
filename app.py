@@ -79,14 +79,8 @@ def detectar_disciplinas(cabecalho_pdf):
         if cel and len(cel) > 1:
             # Limpa o nome: remove quebras de linha e espaços extras
             nome = " ".join(cel.split())
-            # Cabeçalhos verticais no PDF são lidos invertidos pelo pdfplumber
-            # Reverte o nome se o texto invertido tiver mais vogais (mais legível)
-            nome_rev = nome[::-1]
-            vogais = set("AEIOUaeiouAEIOUaeiou")
-            def score(s):
-                return sum(1 for c in s if c in vogais) / max(len(s), 1)
-            if score(nome_rev) > score(nome):
-                nome = nome_rev
+            # Cabeçalhos verticais no PDF do SIGA são sempre lidos invertidos
+            nome = nome[::-1]
             disciplinas.append((nome, i))
             i += 2  # pula a coluna de faltas
         else:
