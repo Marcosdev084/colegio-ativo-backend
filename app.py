@@ -180,7 +180,8 @@ def extrair_cadastro_pdf(pdf_bytes):
                 # Formato: Filiação1 / Filiação2 / Sexo / CPF / Data nascimento
                 filiacao1    = partes[0].upper() if len(partes) > 0 else ""
                 filiacao2    = partes[1].upper() if len(partes) > 1 else "-"
-                sexo         = partes[2].upper() if len(partes) > 2 else ""
+                sexo_raw     = partes[2].strip().upper() if len(partes) > 2 else ""
+                sexo         = "Masculino" if sexo_raw == "M" else "Feminino" if sexo_raw == "F" else ""
                 cpf          = partes[3]          if len(partes) > 3 else '""'
                 data_raw     = partes[4]          if len(partes) > 4 else ""
 
@@ -321,6 +322,8 @@ def extrair():
             pdf_cadastro_bytes = request.files["pdf_cadastro"].read()
             if pdf_cadastro_bytes:
                 cadastros = extrair_cadastro_pdf(pdf_cadastro_bytes)
+
+        # CSV template não é mais necessário — ignora se enviado
 
         # Gera CSV sem cabeçalho (exigência SIGEDUC)
         csv_final    = gerar_csv(alunos_notas, disciplinas, cadastros, sep)
