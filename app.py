@@ -1,8 +1,7 @@
 """
 Backend Flask - Extrator de Notas Colégio Ativo
 Recebe PDFs via POST, extrai dados com pdfplumber (100% preciso)
-e retorna CSV pronto para importar no SIGA.
-Detecta disciplinas automaticamente pelo cabeçalho da tabela do PDF.
+e retorna CSV pronto para importar no SIGEDUC.
 """
 
 from flask import Flask, request, jsonify, Response
@@ -20,7 +19,6 @@ CORS(app)
 # CONFIGURAÇÕES
 # ============================================================
 
-# Palavras que indicam que a coluna NÃO é uma disciplina
 COLUNAS_IGNORAR = {
     "N", "Nº", "NUMERO", "ALUNO", "ALUNO(A)", "NOME", "SITUACAO",
     "SITUAÇÃO", "SITUACAO FINAL", "SITUAÇÃO FINAL", "FREQUENCIA",
@@ -28,12 +26,13 @@ COLUNAS_IGNORAR = {
     "CARGA HORARIA", "CARGA HORÁRIA", "TOTAL DE FALTAS", "F", ""
 }
 
+FREQUENCIA_PADRAO = "99"
+
 # ============================================================
 # FUNÇÕES AUXILIARES
 # ============================================================
 
 def normalizar(texto):
-    """Remove acentos e converte para maiúsculas para comparação."""
     if not texto:
         return ""
     nfkd = unicodedata.normalize('NFKD', str(texto))
@@ -41,48 +40,39 @@ def normalizar(texto):
 
 
 def limpar_nota(valor):
-    """Converte nota brasileira (7,5) para string com vírgula ou retorna None."""
     if valor is None:
-        return None
+        return "-"
     v = str(valor).strip()
     if v in ("---", "", "0,0", "0.0"):
-        return None
+        return "-"
     v = v.replace(",", ".").strip()
     try:
         f = float(v)
         if 0.1 <= f <= 10.0:
             return str(f).replace(".", ",")
-        return None
+        return "-"
     except ValueError:
-        return None
+        return "-"
 
 
 def detectar_disciplinas(cabecalho_pdf):
-    """
-    A partir do cabeçalho da tabela do PDF, detecta quais colunas
-    são disciplinas e retorna lista de (nome_disciplina, indice_coluna).
-    A tabela tem pares [DISCIPLINA | FALTAS] — detecta apenas as disciplinas.
-    """
+    """Detecta disciplinas e seus índices no cabeçalho da tabela."""
     disciplinas = []
     i = 0
     while i < len(cabecalho_pdf):
         cel = str(cabecalho_pdf[i] or "").strip()
         cel_norm = normalizar(cel)
 
-        # Ignora colunas conhecidas que não são disciplinas
         if cel_norm in {normalizar(x) for x in COLUNAS_IGNORAR}:
             i += 1
             continue
 
-        # Se a célula tem texto e não está na lista de ignorar,
-        # assume que é uma disciplina — a próxima coluna é faltas (pula)
         if cel and len(cel) > 1:
-            # Limpa o nome: remove quebras de linha e espaços extras
             nome = " ".join(cel.split())
-            # Cabeçalhos verticais no PDF do SIGA são sempre lidos invertidos
+            # Cabeçalhos verticais no PDF SIGA são lidos invertidos
             nome = nome[::-1]
             disciplinas.append((nome, i))
-            i += 2  # pula a coluna de faltas
+            i += 2  # pula coluna de faltas
         else:
             i += 1
 
@@ -90,15 +80,10 @@ def detectar_disciplinas(cabecalho_pdf):
 
 
 # ============================================================
-# FUNÇÕES DE EXTRAÇÃO
+# EXTRAÇÃO DO PDF DE NOTAS
 # ============================================================
 
 def extrair_notas_pdf(pdf_bytes):
-    """
-    Extrai alunos, disciplinas e notas do PDF de ata.
-    Detecta as disciplinas automaticamente pelo cabeçalho da tabela.
-    Retorna: (lista_alunos, lista_disciplinas)
-    """
     alunos = []
     disciplinas_detectadas = []
 
@@ -108,22 +93,17 @@ def extrair_notas_pdf(pdf_bytes):
             if not tabela:
                 continue
 
-            # Encontra o cabeçalho da tabela (linha com nomes de disciplinas)
+            # Detecta cabeçalho da tabela
             cabecalho_idx = None
             for idx, row in enumerate(tabela):
                 if not row:
                     continue
-                # O cabeçalho tem células como "PORTUGUÊS", "MATEMÁTICA" etc
-                # Identifica pela presença de texto longo em múltiplas células
                 celulas_texto = [c for c in row if c and len(str(c).strip()) > 2]
                 if len(celulas_texto) >= 5 and not str(row[0] or "").strip().isdigit():
-                    # Verifica se parece um cabeçalho de disciplinas
-                    # (não começa com número como linhas de alunos)
                     cabecalho_idx = idx
                     break
 
             if cabecalho_idx is not None and not disciplinas_detectadas:
-                # Junta linhas do cabeçalho (pode ser multi-linha no PDF)
                 cab = []
                 for idx in range(cabecalho_idx, min(cabecalho_idx + 3, len(tabela))):
                     row = tabela[idx]
@@ -137,7 +117,6 @@ def extrair_notas_pdf(pdf_bytes):
 
                 disciplinas_detectadas = detectar_disciplinas(cab)
 
-            # Extrai linhas de alunos
             for row in tabela:
                 if not row or not row[0]:
                     continue
@@ -151,13 +130,12 @@ def extrair_notas_pdf(pdf_bytes):
 
                 situacao = str(row[-1]).strip() if row[-1] else ""
 
-                # Extrai notas usando os índices detectados
                 notas = []
                 for nome_disc, col_idx in disciplinas_detectadas:
                     if col_idx < len(row):
                         notas.append(limpar_nota(row[col_idx]))
                     else:
-                        notas.append(None)
+                        notas.append("-")
 
                 alunos.append({
                     "nome": nome.upper(),
@@ -169,12 +147,12 @@ def extrair_notas_pdf(pdf_bytes):
     return alunos, nomes_disciplinas
 
 
+# ============================================================
+# EXTRAÇÃO DO PDF DE CADASTRO
+# Formato novo: Filiação 1 / Filiação 2 / Sexo / CPF / Data nascimento
+# ============================================================
+
 def extrair_cadastro_pdf(pdf_bytes):
-    """
-    Extrai dados cadastrais do PDF de relação de alunos (SIGA).
-    Formato: Nº | Matrícula | Nome
-             Filiação 2 / CPF / Data de nascimento
-    """
     alunos = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -186,24 +164,44 @@ def extrair_cadastro_pdf(pdf_bytes):
     i = 0
     while i < len(linhas):
         linha = linhas[i].strip()
+
+        # Linha de aluno: número + matrícula + nome em maiúsculas
         match = re.match(
             r'^(\d+)\s+(\d+)\s+([A-ZÁÉÍÓÚÀÃÕÂÊÔÜÇ][A-ZÁÉÍÓÚÀÃÕÂÊÔÜÇa-záéíóúàãõâêôüç\s]+)$',
             linha
         )
         if match:
             nome = match.group(3).strip().upper()
+
             if i + 1 < len(linhas):
                 prox = linhas[i + 1].strip()
-                partes = prox.split("/")
-                filiacao2    = partes[0].strip().upper() if len(partes) > 0 else ""
-                cpf          = partes[1].strip()         if len(partes) > 1 else ""
-                data_nasc_raw = partes[2].strip()        if len(partes) > 2 else ""
-                data_nasc    = converter_data(data_nasc_raw)
+                partes = [p.strip() for p in prox.split("/")]
+
+                # Formato: Filiação1 / Filiação2 / Sexo / CPF / Data nascimento
+                filiacao1    = partes[0].upper() if len(partes) > 0 else ""
+                filiacao2    = partes[1].upper() if len(partes) > 1 else "-"
+                sexo         = partes[2].upper() if len(partes) > 2 else ""
+                cpf          = partes[3]          if len(partes) > 3 else '""'
+                data_raw     = partes[4]          if len(partes) > 4 else ""
+
+                # CPF vazio → aspas duplas conforme exigência SIGEDUC
+                cpf = cpf.strip()
+                if not cpf:
+                    cpf = '""'
+
+                # Filiação 2 vazia → traço conforme exigência SIGEDUC
+                if not filiacao2.strip() or filiacao2.strip() == "":
+                    filiacao2 = "-"
+
+                data_nasc = converter_data(data_raw)
+
                 alunos.append({
-                    "nome": nome,
-                    "cpf": cpf,
+                    "nome":           nome,
+                    "filiacao1":      filiacao1,
+                    "filiacao2":      filiacao2,
+                    "sexo":           sexo,
+                    "cpf":            cpf,
                     "data_nascimento": data_nasc,
-                    "filiacao2": filiacao2,
                 })
                 i += 2
                 continue
@@ -233,7 +231,6 @@ def converter_data(texto):
 
 
 def buscar_por_nome(lista_cadastro, nome_aluno):
-    """Busca cadastro pelo nome normalizado."""
     nome_norm = normalizar(nome_aluno)
     for cad in lista_cadastro:
         if normalizar(cad["nome"]) == nome_norm:
@@ -247,57 +244,45 @@ def buscar_por_nome(lista_cadastro, nome_aluno):
     return None
 
 
-def gerar_csv(alunos_notas, disciplinas, cadastros, cabecalho_template, sep):
+# ============================================================
+# GERAÇÃO DO CSV
+# ============================================================
+
+def gerar_csv(alunos_notas, disciplinas, cadastros, sep):
     """
-    Monta CSV final: colunas fixas do template + disciplinas detectadas do PDF.
+    Gera CSV no formato exato exigido pelo SIGEDUC:
+    CPF ; Nome do Estudante ; Data de Nascimento ; Sexo ;
+    Nome da Filiação 1 ; Nome da Filiação 2 ; Código INEP ;
+    Frequência ; Situação ; Nota_disc1 ; Nota_disc2 ; ...
+    SEM cabeçalho (conforme exigência do sistema).
     """
-    # Colunas fixas do template (ignora NOTA_*, ... e NOTA_N)
-    cols_fixas = [
-        c for c in cabecalho_template
-        if not normalizar(c).startswith("NOTA") and normalizar(c) not in ("...", "")
-    ]
-
-    # Cabeçalho final: fixas + nomes reais das disciplinas
-    cabecalho_final = cols_fixas + disciplinas
-
-    def idx(candidatos):
-        for cand in candidatos:
-            for i, c in enumerate(cabecalho_final):
-                if normalizar(c) == normalizar(cand):
-                    return i
-        return -1
-
-    col_nome      = idx(["NOME DO ESTUDANTE", "NOME DO ALUNO"])
-    col_situacao  = idx(["SITUACAO", "SITUAÇÃO"])
-    col_cpf       = idx(["CPF"])
-    col_nasc      = idx(["DATA DE NASCIMENTO"])
-    col_filiacao2 = idx(["NOME DA FILIACAO 2", "NOME DA FILIAÇÃO 2"])
-
     output = io.StringIO()
     writer = csv.writer(output, delimiter=sep)
-    writer.writerow(cabecalho_final)
 
     for aluno in alunos_notas:
-        linha = [""] * len(cabecalho_final)
-
-        if col_nome >= 0:
-            linha[col_nome] = aluno["nome"]
-        if col_situacao >= 0:
-            linha[col_situacao] = aluno["situacao"]
-
-        inicio_notas = len(cols_fixas)
-        for i, nota in enumerate(aluno["notas"]):
-            if inicio_notas + i < len(linha):
-                linha[inicio_notas + i] = nota or ""
-
         cad = buscar_por_nome(cadastros, aluno["nome"])
-        if cad:
-            if col_cpf >= 0:
-                linha[col_cpf] = cad.get("cpf", "")
-            if col_nasc >= 0:
-                linha[col_nasc] = cad.get("data_nascimento", "")
-            if col_filiacao2 >= 0:
-                linha[col_filiacao2] = cad.get("filiacao2", "")
+
+        cpf        = cad.get("cpf", '""')            if cad else '""'
+        nome       = aluno["nome"]
+        data_nasc  = cad.get("data_nascimento", "")  if cad else ""
+        sexo       = cad.get("sexo", "")              if cad else ""
+        filiacao1  = cad.get("filiacao1", "")         if cad else ""
+        filiacao2  = cad.get("filiacao2", "-")        if cad else "-"
+        inep       = "-"  # preenchido com traço conforme SIGEDUC
+        frequencia = FREQUENCIA_PADRAO
+        situacao   = aluno["situacao"]
+
+        linha = [
+            cpf,
+            nome,
+            data_nasc,
+            sexo,
+            filiacao1,
+            filiacao2,
+            inep,
+            frequencia,
+            situacao,
+        ] + aluno["notas"]
 
         writer.writerow(linha)
 
@@ -318,29 +303,14 @@ def extrair():
     try:
         if "pdf_notas" not in request.files:
             return jsonify({"erro": "PDF de notas não enviado"}), 400
-        if "csv_template" not in request.files:
-            return jsonify({"erro": "CSV modelo não enviado"}), 400
 
-        pdf_notas_bytes    = request.files["pdf_notas"].read()
-        csv_template_bytes = request.files["csv_template"].read()
-        turma              = request.form.get("turma", "turma")
+        pdf_notas_bytes = request.files["pdf_notas"].read()
+        turma           = request.form.get("turma", "turma")
 
-        # Lê template CSV com múltiplos encodings
-        csv_texto = None
-        for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
-            try:
-                csv_texto = csv_template_bytes.decode(enc).strip()
-                break
-            except Exception:
-                continue
-        if csv_texto is None:
-            return jsonify({"erro": "Não foi possível ler o CSV. Salve como UTF-8."}), 400
+        # Separador padrão SIGEDUC
+        sep = ";"
 
-        linhas_csv = [l for l in csv_texto.split("\n") if l.strip()]
-        sep        = ";" if ";" in linhas_csv[0] else ","
-        cabecalho  = [c.strip() for c in linhas_csv[0].split(sep)]
-
-        # Extrai notas + disciplinas do PDF (dinâmico)
+        # Extrai notas + disciplinas do PDF
         alunos_notas, disciplinas = extrair_notas_pdf(pdf_notas_bytes)
         if not alunos_notas:
             return jsonify({"erro": "Nenhum aluno encontrado no PDF de notas."}), 400
@@ -352,8 +322,8 @@ def extrair():
             if pdf_cadastro_bytes:
                 cadastros = extrair_cadastro_pdf(pdf_cadastro_bytes)
 
-        # Gera CSV com disciplinas reais
-        csv_final    = gerar_csv(alunos_notas, disciplinas, cadastros, cabecalho, sep)
+        # Gera CSV sem cabeçalho (exigência SIGEDUC)
+        csv_final    = gerar_csv(alunos_notas, disciplinas, cadastros, sep)
         ano_letivo   = "2025"
         nome_arquivo = f"resultado_{turma.replace(' ', '_').lower()}_{ano_letivo}.csv"
 
