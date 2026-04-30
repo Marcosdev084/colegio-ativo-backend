@@ -289,8 +289,16 @@ def extrair():
         csv_template_bytes = request.files["csv_template"].read()
         turma              = request.form.get("turma", "turma")
 
-        # Lê template CSV
-        csv_texto   = csv_template_bytes.decode("utf-8-sig").strip()
+        # Lê template CSV — tenta vários encodings
+        csv_texto = None
+        for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+            try:
+                csv_texto = csv_template_bytes.decode(enc).strip()
+                break
+            except Exception:
+                continue
+        if csv_texto is None:
+            return jsonify({"erro": "Não foi possível ler o arquivo CSV. Tente salvar como UTF-8."}), 400
         linhas_csv  = [l for l in csv_texto.split("\n") if l.strip()]
         sep         = ";" if ";" in linhas_csv[0] else ","
         cabecalho   = [c.strip() for c in linhas_csv[0].split(sep)]
